@@ -1,0 +1,507 @@
+{
+  "license": "GPL-3.0-or-later",
+  "type": "mixer",
+  "runtime": "docker",
+  "atem_role": "mixer",
+  "label": "Mélangeur",
+  "badge": {
+    "label": "Mélangeur",
+    "class": "mode-mixer",
+    "oklch": "0.78 0.05 20"
+  },
+  "skaarhoj": {
+    "mode": "mixer",
+    "desc_i18n": "settings.js.skh_desc_mixer"
+  },
+  "version": "0.23.7",
+  "description": "Mélangeur N→PGM/CLEAN/PVW : N entrées (1-20), bus PGM (+ overlay/keyer), CLEAN, PVW, transitions (cut/dissolve/wipe). Piloté à chaud (page Traitements + pupitre ATEM). Mode tranche MXL opt-in (slice_mode).",
+  "nav": {
+    "section": "composition",
+    "label": "Composition",
+    "route": "/composition",
+    "order": 10
+  },
+  "script_template": "script.py",
+  "ui": {
+    "control_html": "control.html",
+    "control_js": "control.js",
+    "control_css": "control.css"
+  },
+  "deploy_defaults": {
+    "n_inputs": 2,
+    "width": 1280,
+    "height": 720,
+    "fps": 25,
+    "scan": "p",
+    "dissolve_ms": 500,
+    "overlay_url": null,
+    "overlay_enabled": false,
+    "genlock": true,
+    "align_budget": 1,
+    "sync_ref": 0,
+    "log_level": "info"
+  },
+  "config_schema": [
+    {
+      "key": "n_inputs",
+      "type": "number",
+      "label": "Nombre d'entrées",
+      "min": 1,
+      "max": 20,
+      "default": 2,
+      "help": "1 à 20 entrées. Les slots non utilisés ne coûtent rien (le mélangeur ne lit que le PGM, le PVW, le keyer et la destination d'une transition). Un pupitre ATEM n'adresse que les entrées couvertes par ses boutons de bus (8 sur la plupart des modèles)."
+    },
+    {
+      "key": "dissolve_ms",
+      "type": "number",
+      "label": "Dissolve par défaut (ms)",
+      "min": 0,
+      "max": 10000,
+      "step": 100,
+      "default": 500,
+      "scope": "user"
+    },
+    {
+      "key": "overlay_enabled",
+      "type": "checkbox",
+      "label": "Overlay HTML (DSK)",
+      "default": false,
+      "scope": "user"
+    },
+    {
+      "key": "overlay_url",
+      "type": "text",
+      "label": "URL overlay",
+      "placeholder": "http://…",
+      "visible_if": {
+        "overlay_enabled": true
+      },
+      "scope": "user"
+    },
+    {
+      "key": "tally_force",
+      "label": "Émettre même si ma sortie n'est pas à l'antenne",
+      "type": "bool",
+      "default": true,
+      "help": "Décoché, ce mélangeur ne tallye ses entrées que si sa propre sortie PGM porte un tally sur les niveaux de sa production — c'est la propagation normale du tally. Coché (défaut), il émet sans condition : c'est le comportement historique, conservé pour ne pas éteindre le tally d'un site dont la sortie de mélangeur n'est mappée nulle part. ⚠ Lu par l'ORCHESTRATEUR (service TSL), jamais par le conteneur : il s'applique À CHAUD, sans redéployer.",
+      "redeploiement": false,
+      "scope": "user"
+    },
+    {
+      "key": "tally_emit",
+      "type": "checkbox",
+      "label": "Émettre le tally (PGM/PVW)",
+      "help": "Publie le tally du mélangeur sur des niveaux de Tally (défaut : ceux de sa production). Les sources sont identifiées par les ports du projet. ⚠ Lu par l'ORCHESTRATEUR (service TSL), jamais par le conteneur : il s'applique À CHAUD, sans redéployer.",
+      "default": false,
+      "redeploiement": false,
+      "scope": "user"
+    },
+    {
+      "key": "tally_level_base",
+      "type": "multiselect",
+      "label": "Niveaux de tally émis",
+      "default": [],
+      "options_from": "tally_levels",
+      "help": "Sur quels niveaux ce mélangeur publie le tally de ses entrées — un niveau est une entité NOMMÉE du site (Réglages → Labels & Tally), pas un numéro de bande d'un protocole. Plusieurs choix possibles. Aucun choix = ceux de la production du conteneur. ⚠ Lu par l'ORCHESTRATEUR (service TSL), jamais par le conteneur : il s'applique À CHAUD, sans redéployer.",
+      "redeploiement": false,
+      "scope": "user",
+      "visible_if": {
+        "tally_emit": true
+      }
+    },
+    {
+      "key": "slice_mode",
+      "hidden": true,
+      "type": "checkbox",
+      "label": "Mode tranche (latence sous-image)",
+      "help": "La vidéo est publiée bande par bande sur le bus MXL : l'aval démarre sur la première bande sans attendre l'image complète (latence sous-image). Entrelacé ou hauteur non divisible → repli image entière. Désactivé (défaut) = comportement historique. Exige le genlock.",
+      "default": false,
+      "scope": "system"
+    },
+    {
+      "key": "slice_lines",
+      "hidden": true,
+      "type": "number",
+      "label": "Lignes par tranche",
+      "help": "Hauteur des bandes (lignes). Doit être un diviseur de la hauteur d'image (36 pour 1080p) — sinon repli image entière.",
+      "min": 4,
+      "max": 540,
+      "default": 36,
+      "scope": "system",
+      "visible_if": {
+        "slice_mode": true
+      }
+    },
+    {
+      "key": "slice_late_pct",
+      "hidden": true,
+      "type": "number",
+      "label": "Seuil d'alerte replis (%)",
+      "help": "Taux de replis image entière (fenêtre ~10 s) au-delà duquel une entrée est signalée (advisory). Ne bloque ni ne dégrade rien : on signale, l'exploitant décide.",
+      "min": 0.5,
+      "max": 50,
+      "step": 0.5,
+      "default": 5,
+      "scope": "system",
+      "visible_if": {
+        "slice_mode": true
+      }
+    },
+    {
+      "key": "log_level",
+      "type": "select",
+      "label": "Niveau de log",
+      "help": "Verbosité du journal du conteneur. Défaut « Événements » : les faits marquants (démarrage/arrêt, changement de format, reconnexion, repli sur un chemin dégradé, entrée qui apparaît ou disparaît) sont TOUJOURS écrits — après une panne le journal doit permettre de reconstituer l'histoire, et élever le niveau après coup ne récupère rien. Les métriques périodiques (fps, compteurs) ne sont PAS journalisées : elles sont déjà publiées sur :8080. « Détaillé » = lance-flammes par trame, à n'activer que le temps d'un diagnostic (le journal Docker n'est pas roté).",
+      "options": [
+        {
+          "value": "debug",
+          "label": "Détaillé (par trame — diagnostic ponctuel)"
+        },
+        {
+          "value": "info",
+          "label": "Événements (défaut)"
+        },
+        {
+          "value": "warning",
+          "label": "Anomalies seules"
+        },
+        {
+          "value": "error",
+          "label": "Erreurs seules"
+        }
+      ],
+      "default": "info",
+      "scope": "user"
+    }
+  ],
+  "wiring": {
+    "produces": [
+      {
+        "essence": "video",
+        "shm": "{hostname}_pgm",
+        "label": "PGM"
+      },
+      {
+        "essence": "video",
+        "shm": "{hostname}_clean",
+        "label": "CLEAN"
+      },
+      {
+        "essence": "video",
+        "shm": "{hostname}_pvw",
+        "label": "PVW"
+      }
+    ],
+    "consumes": [
+      {
+        "repeat": "n_inputs",
+        "essence": "video",
+        "state_field": "input_{i1}",
+        "label": "Entrée {i1}"
+      }
+    ],
+    "mode": "hot-wire",
+    "state_endpoint": "/state"
+  },
+  "control": {
+    "port": 8082,
+    "endpoints": [
+      "/state",
+      "/input",
+      "/pgm",
+      "/pvw",
+      "/take",
+      "/mix",
+      "/preset",
+      "/targets",
+      "/keyer/input",
+      "/keyer/active",
+      "/keyer/transform",
+      "/overlay",
+      "/config",
+      "/preview.png",
+      "/log_level"
+    ],
+    "read_endpoints": [
+      "/state",
+      "/preview.png"
+    ],
+    "atem": {
+      "CPgI": "/pgm",
+      "CPvI": "/pvw",
+      "DCut": "/take",
+      "DAut": "/take",
+      "CTPs": "/mix"
+    }
+  },
+  "param_tree": {
+    "global_groups": [
+      {
+        "label": "Incrustation (position / taille)",
+        "endpoint": "/keyer/transform",
+        "path_prefix": "keyer",
+        "fields": {
+          "x": {
+            "label": "Position X",
+            "type": "position",
+            "min": 0,
+            "max": 1,
+            "default": 0.5
+          },
+          "y": {
+            "label": "Position Y",
+            "type": "position",
+            "min": 0,
+            "max": 1,
+            "default": 0.5
+          },
+          "scale": {
+            "label": "Échelle",
+            "type": "scale",
+            "min": 0.05,
+            "max": 1,
+            "default": 0.3
+          },
+          "border_width": {
+            "label": "Bordure",
+            "type": "pixels",
+            "min": 0,
+            "max": 50,
+            "default": 0
+          }
+        }
+      },
+      {
+        "label": "Transition",
+        "endpoint": "/preset",
+        "path_prefix": "preset",
+        "fields": {
+          "mode": {
+            "label": "Type",
+            "type": "enum",
+            "options": [
+              "dissolve",
+              "additif",
+              "wipe"
+            ],
+            "default": "dissolve"
+          }
+        }
+      },
+      {
+        "label": "Volet (wipe)",
+        "endpoint": "/preset",
+        "wrap": "wipe",
+        "path_prefix": "preset",
+        "fields": {
+          "direction": {
+            "label": "Direction",
+            "type": "enum",
+            "options": [
+              "horizontal",
+              "vertical",
+              "diagonal",
+              "iris",
+              "heart"
+            ],
+            "default": "horizontal"
+          },
+          "reverse": {
+            "label": "Inverser",
+            "type": "bool",
+            "default": false
+          },
+          "softness": {
+            "label": "Adoucissement",
+            "type": "ratio",
+            "min": 0,
+            "max": 1,
+            "default": 0.1
+          }
+        }
+      },
+      {
+        "label": "Réglages",
+        "endpoint": "/config",
+        "fields": {
+          "dissolve_ms": {
+            "label": "Fondu par défaut",
+            "type": "duration",
+            "min": 0,
+            "max": 10000,
+            "default": 500,
+            "path": "default_dissolve_ms"
+          }
+        }
+      },
+      {
+        "label": "Habillage (DSK)",
+        "endpoint": "/overlay",
+        "fields": {
+          "enabled": {
+            "label": "Afficher l'habillage",
+            "type": "bool",
+            "default": false,
+            "path": "overlay_enabled"
+          }
+        }
+      },
+      {
+        "label": "Journal (diagnostic)",
+        "endpoint": "/log_level",
+        "fields": {
+          "level": {
+            "label": "Niveau de log",
+            "type": "enum",
+            "options": [
+              "debug",
+              "info",
+              "warning",
+              "error"
+            ],
+            "default": "info",
+            "path": "log_level"
+          }
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "id": "take",
+      "label": "AUTO (fondu)",
+      "endpoint": "/take",
+      "params": [],
+      "help": "Transition à la durée de fondu du mélangeur (réglage dissolve_ms). L'ancien libellé « Take (cut) » mentait : sans durée, /take a toujours fondu."
+    },
+    {
+      "id": "cut",
+      "label": "CUT",
+      "endpoint": "/take",
+      "body": {
+        "duration_ms": 0
+      },
+      "params": []
+    },
+    {
+      "id": "pgm",
+      "label": "PGM → entrée",
+      "endpoint": "/pgm",
+      "params": [
+        {
+          "key": "input",
+          "label": "Entrée",
+          "type": "number",
+          "default": 0,
+          "options_from": "inputs"
+        }
+      ]
+    },
+    {
+      "id": "pvw",
+      "label": "PVW → entrée",
+      "endpoint": "/pvw",
+      "params": [
+        {
+          "key": "input",
+          "label": "Entrée",
+          "type": "number",
+          "default": 0,
+          "options_from": "inputs"
+        }
+      ]
+    },
+    {
+      "id": "keyer_toggle",
+      "label": "Keyer : bascule (cut)",
+      "endpoint": "/keyer/active",
+      "params": []
+    },
+    {
+      "id": "overlay",
+      "label": "Overlay HTML (DSK)",
+      "endpoint": "/overlay",
+      "params": [
+        {
+          "key": "enabled",
+          "label": "Affiché",
+          "type": "bool",
+          "default": true
+        }
+      ]
+    },
+    {
+      "id": "log_level",
+      "label": "Niveau de log (à chaud)",
+      "endpoint": "/log_level",
+      "params": [
+        {
+          "key": "level",
+          "label": "Niveau",
+          "type": "text",
+          "default": "info",
+          "options": [
+            {
+              "value": "debug",
+              "label": "Détaillé"
+            },
+            {
+              "value": "info",
+              "label": "Événements (défaut)"
+            },
+            {
+              "value": "warning",
+              "label": "Anomalies seules"
+            },
+            {
+              "value": "error",
+              "label": "Erreurs seules"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "state": [
+    {
+      "id": "pgm",
+      "label": "Entrée PGM",
+      "endpoint": "/state",
+      "path": "pgm",
+      "type": "number"
+    },
+    {
+      "id": "pvw",
+      "label": "Entrée PVW",
+      "endpoint": "/state",
+      "path": "pvw",
+      "type": "number"
+    },
+    {
+      "id": "transition",
+      "label": "Transition en cours",
+      "endpoint": "/state",
+      "path": "transition",
+      "type": "bool"
+    },
+    {
+      "id": "keyer_active",
+      "label": "Keyer à l'antenne",
+      "endpoint": "/state",
+      "path": "keyer.active",
+      "type": "bool"
+    }
+  ],
+  "resources": {
+    "signature_keys": [
+      "n_inputs",
+      "width",
+      "height",
+      "fps",
+      "scan",
+      "overlay_enabled",
+      "genlock",
+      "align_budget"
+    ]
+  }
+}
