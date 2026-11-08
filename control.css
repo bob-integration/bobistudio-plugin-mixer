@@ -1,0 +1,395 @@
+/* UI de contrôle embarquée du Mélangeur (shell Traitements). Éditeur uniquement. */
+.mx-error { margin:0 0 10px; padding:8px 12px; border:1px solid var(--status-stopped-fg);
+    background:var(--status-stopped-bg); color:var(--status-stopped-fg);
+    border-radius:4px; font-size:0.88em; display:flex; align-items:center; gap:8px; }
+.mx-error button { background:none; border:none; color:inherit; cursor:pointer; font-size:1em; line-height:1; }
+
+/* Rangées de bus : libellé (pastille du catalogue, .ctl-bus-lab--tag) + touches. Les touches
+ * viennent du catalogue (.ctl-bus.ctl-bus--panel, ex-.nkk-btn privé, promu le 2026-10-25) : ne
+ * reste ici que la mise en page. */
+/* Rangées de SOURCES (0.23.66, décision de Cyril du 31/10 : « un bouton doit avoir une taille fixe ») :
+ * touches à la taille du catalogue (--ctl-bus-panel-w), alignées à gauche, la place en trop reste
+ * vide. Jamais de retour à la ligne ni de touche serrée : control.js compte ce qui tient
+ * (ResizeObserver, busFit) et, s'il en manque, montre n−1 entrées + une touche SHIFT au bout de la
+ * rangée, qui pagine. Toutes les rangées (BGD A / BGD B / keyers) sont à la MÊME page : l'entrée #14
+ * tombe à la même place sur chacune, comme sur un pupitre. */
+.mx-bus-row { display:flex; gap:10px; align-items:center; margin-bottom:10px; }
+.mx-bus-row > .ctl-bus-lab--tag { flex:none; width:64px; font-family:var(--font-mono); font-size:0.72em; letter-spacing:0.06em; }
+.mx-bus-btns { flex:1 1 auto; min-width:0; display:flex; flex-wrap:nowrap; gap:var(--mx-key-gap, 6px); overflow:hidden; }
+.mx-bus-keys { display:flex; flex-wrap:nowrap; gap:var(--mx-key-gap, 6px); }
+
+/* Note « au-delà de 8 entrées » : le pupitre ATEM n'adresse que ses boutons de bus. */
+.mx-inputs-note { margin:2px 0 8px; font-size:0.82em; }
+.mx-atem-warn { color:var(--status-warning-fg); }
+
+/* ─── Pupitre devant, réglages à côté (0.23.16) ──────────────────────────────────────────────
+ * Mise en page seule. Large : pupitre + colonne de réglages à droite quand elle est ouverte.
+ * Étroit (≤ 1100 px, iPad portrait et paysage) : le panneau passe PAR-DESSUS le pupitre, avec
+ * un voile qui le ferme d'un toucher. */
+.mx-ops { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-items:start; }
+.mx-ops.side-open { grid-template-columns:minmax(0,1fr) minmax(300px,380px); }
+/* Éditeur de volet composé ouvert (0.23.47) : le panneau s'élargit le temps de l'édition. */
+.mx-ops.side-open.side-wide { grid-template-columns:minmax(0,1fr) minmax(300px,min(940px,72vw)); }
+.mx-desk { min-width:0; }
+.mx-desk-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.mx-desk-head .mx-state-bar { flex:1; }
+.mx-side { display:flex; flex-direction:column; gap:12px; padding:12px; min-width:0;
+    border:1px solid var(--border-soft); border-radius:6px; background:var(--bg-input);
+    max-height:calc(100vh - 140px); overflow:auto; position:sticky; top:8px; overscroll-behavior:contain; }
+.mx-side[hidden] { display:none; }
+/* Colonne à hauteur bornée qui DÉFILE : ses enfants gardent leur hauteur. Sans ça, la barre de
+   rubriques — seule à pouvoir descendre à 0, `.tabs[role=tablist]` lui imposant overflow-x:auto —
+   était écrasée dès que le détail du keyer dépassait la hauteur : il ne restait que sa bordure
+   (rapporté par l'utilisateur le 28/10, « je ne vois pas les onglets »). */
+.mx-side > * { flex-shrink:0; }
+.mx-side-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.mx-side-title { font-weight:700; }
+.mx-side-sec { display:flex; flex-direction:column; gap:8px; padding-top:10px; border-top:1px solid var(--border-soft); }
+.mx-side-khead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.mx-side-scrim { display:none; }
+@media (max-width:1100px) {
+    .mx-ops.side-open { grid-template-columns:minmax(0,1fr); }
+    .mx-side { position:fixed; top:0; right:0; bottom:0; z-index:60; width:min(400px,92vw);
+        max-height:none; border-radius:0; border-width:0 0 0 1px; box-shadow:-6px 0 24px rgba(0,0,0,0.35); }
+    .mx-ops.side-wide .mx-side { width:min(980px,100vw); }
+    .mx-ops.side-open .mx-side-scrim { display:block; position:fixed; inset:0; z-index:59;
+        background:rgba(0,0,0,0.35); }
+}
+
+/* ─── Keyers (0.23.14 ; ligne compacte 0.23.16) ──────────────────────────────────────────────
+ * Au pupitre : une ligne par keyer. Dans le panneau : le détail du keyer choisi. Contrôles du
+ * catalogue (ctl-select, ctl-push, ctl-knob, ctl-readout) : ne restent ici que la mise en page
+ * et le liseré d'antenne de la ligne. */
+.mx-keyer-rows { margin:4px 0 6px; }
+.mx-keyers { display:flex; flex-direction:column; gap:6px; margin:4px 0 14px; }
+.mx-keyer-detail { display:flex; flex-direction:column; gap:8px; }
+.mx-k-head, .mx-k-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.mx-k-knobs { align-items:flex-start; gap:6px; }
+.mx-k-name { font-family:var(--font-mono); font-size:0.8em; font-weight:700; letter-spacing:0.6px;
+    text-transform:uppercase; min-width:52px; }
+.mx-k-type b { font-size:0.85em; }
+.mx-k-field { display:inline-flex; align-items:center; gap:6px; }
+/* Couleur de clé du keyer chroma : contrôles du catalogue (.ctl-color, .ctl-swatch). */
+.mx-k-presets { display:flex; flex-direction:column; gap:6px; }
+.mx-k-preset-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+.mx-k-preset { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.mx-k-preset-name { flex:1; min-width:6em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mx-k-presets input[type=text] { flex:1; min-width:10em; min-height:32px; }
+/* Zone de transition (0.23.17) : T-barre à gauche, au niveau de BGD A / BGD B et du bloc transition ;
+   rangées des keyers AU-DESSUS, dans la même colonne que les bus → mêmes colonnes, mêmes touches. */
+.mx-transition-zone { display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px 14px; margin:14px 0; align-items:stretch; }
+.mx-transition-zone > .mx-keyer-rows { grid-column:2; margin:0; }
+.mx-transition-zone > .mx-tbar { grid-column:1; }
+.mx-transition-zone > .mx-me { grid-column:2; min-width:0; display:flex; flex-direction:column; }
+.mx-me .mx-take { min-width:0; }
+/* T-barre : composant du catalogue (.ctl-tbar, static/css/controls.css), promu le 2026-10-26. */
+
+.mx-take { display:flex; flex-direction:column; gap:12px; padding:12px;
+    border:1px solid var(--border-soft); border-radius:6px; background:var(--bg-input); flex:1; min-width:280px; }
+.mx-take-row { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+.mx-preset-row { padding-bottom:8px; border-bottom:1px dashed var(--border-soft); }
+.mx-wipe-controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    padding-left:8px; margin-left:4px; border-left:1px solid var(--border-soft); }
+.mx-wipe-controls[hidden] { display:none; }
+/* Réglages du volet (0.23.44) : deux rangées (géométrie, bordure) sous la douceur. */
+.mx-wipe-settings { flex-direction:column; align-items:stretch; gap:6px; }
+/* Pictogrammes des formes : `.ctl-shape` du catalogue depuis 0.23.47 (ex-`.mx-wipe-icon-btn`, aux
+   couleurs en dur, qui ne suivaient pas les thèmes). */
+.mx-preset-section-label { font-family:var(--font-mono); font-size:0.7em;
+    font-weight:600; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-muted); padding:0 2px; }
+.mx-side input[type=number] { width:90px; -moz-appearance:textfield; }
+.mx-side input[type=number]::-webkit-outer-spin-button, .mx-side input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.mx-overlay-box { padding:10px; border:1px solid var(--border-soft); border-radius:6px; margin-top:8px; }
+.mx-overlay-box .row { display:flex; gap:8px; align-items:center; margin-top:6px; flex-wrap:wrap; }
+.mx-overlay-box input[type=text] { flex:1; min-width:200px; min-height:32px; }
+.mx-dsk-preview-wrap { margin-top:12px; padding:8px; background:#080808; border:1px solid #000;
+    border-radius:6px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.04),inset 0 0 4px rgba(0,0,0,0.6); max-width:480px; }
+.mx-dsk-preview-empty { color:var(--text-muted); font-size:0.85em; padding:24px 12px; text-align:center; font-style:italic; }
+.mx-dsk-preview-label { display:flex; justify-content:space-between; align-items:center;
+    font-family:var(--font-mono); font-size:0.72em; color:var(--text-muted);
+    text-transform:uppercase; letter-spacing:0.6px; padding:2px 4px 6px; }
+.mx-dsk-preview-status { color:var(--text-muted); font-weight:600; }
+.mx-dsk-preview-status.on { color:var(--bus-pgm); text-shadow:0 0 4px rgba(192,57,43,0.6); }
+.mx-dsk-preview { display:block; width:100%; aspect-ratio:16/9; border:0; border-radius:3px; background:#000; pointer-events:none; }
+.mx-state-bar { font-size:0.85em; color:var(--text-muted); padding:6px 0; }
+
+/* ─── Tally ────────────────────────────────────────────────────────────────
+ * Les trois réglages de tally vivent sur CETTE page depuis 0.23.0 : ils ne sont lus que par
+ * le service TSL de l'orchestrateur, donc ils s'appliquent à chaud et n'ont rien à faire au
+ * panneau ⚙, réservé aux réglages système.
+ * ⚠ Le titre du champ de niveaux est un <span>, PAS un <label> : un <label> sans « for »
+ * renvoie tout clic vers le premier bouton qu'il contient — ici la croix de la première
+ * puce. Cliquer à côté d'une puce en supprimait une. */
+.mx-tally-box { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border);
+                border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+.mx-tally-field { display: flex; flex-direction: column; gap: 4px; }
+.mx-tally-titre { font-size: 0.85em; color: var(--text-muted); }
+
+/* ─── Onglet « Entrées & délais » (0.23.11) : mise en page seule — les contrôles viennent du
+ * catalogue partagé (.ctl-select, .ctl-push, .ctl-readout) et les pastilles du cœur (.badge). */
+.mx-dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px) var(--space-3, 12px); margin-bottom: var(--space-2, 8px); }
+.mx-dl-ref { display: inline-flex; align-items: center; gap: var(--space-2, 8px); margin-left: auto; }
+.mx-dl-tablewrap { overflow-x: auto; margin: var(--space-3, 12px) 0; }
+.mx-dl-table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.9em; }
+.mx-dl-table th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 0.85em; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.mx-dl-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.mx-dl-num, .mx-dl-pct { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mx-dl-src { font-family: var(--font-mono); font-size: 0.92em; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+/* Arrivées (0.23.21) : texte et réglages à leur largeur à gauche, les deux graphiques se partagent
+   le reste à droite. */
+.mx-dl-table td:not(.mx-dl-arrcol):not(.mx-dl-trendcol),
+.mx-dl-table th:not(.mx-dl-arrcol):not(.mx-dl-trendcol) { width: 1%; white-space: nowrap; }
+.mx-dl-arrcol { width: 62%; min-width: 180px; }
+.mx-dl-trendcol { width: 38%; min-width: 120px; }
+.mx-arr-cell, .mx-trend-cell { display: flex; align-items: center; gap: var(--space-2, 8px); }
+.mx-arr { position: relative; flex: 1; min-width: 0; height: 20px; }
+.mx-arr > span { position: absolute; }
+.mx-arr-band { top: 0; bottom: 0; background: var(--bg-hover); border-left: 1px solid var(--border); }
+.mx-arr-band:nth-child(even) { background: var(--bg-input); }
+.mx-arr-dl { top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); }
+.mx-arr-bar { top: 8px; height: 4px; border-radius: 2px; opacity: .55; }
+.mx-arr-dot { top: 4px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; box-shadow: 0 0 0 2px var(--bg-elev); }
+.mx-arr-ok   { --mx-arr-col: var(--status-info-fg); }
+.mx-arr-warn { --mx-arr-col: var(--status-warn-fg); }
+.mx-arr-late { --mx-arr-col: var(--status-error-fg); }
+.mx-arr-bar, .mx-arr-dot { background: var(--mx-arr-col); }
+.mx-arr-ms { flex: none; min-width: 3.2em; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 0.9em; color: var(--mx-arr-col); }
+.mx-arr-axis { height: 14px; margin-top: 2px; margin-right: calc(3.2em + var(--space-2, 8px)); }
+.mx-arr-axis > span { top: 0; padding-left: 3px; font-family: var(--font-mono); font-size: 0.85em; }
+.mx-trend { flex: 1; min-width: 60px; height: 24px; }
+.mx-trend polyline { fill: none; stroke: var(--mx-arr-col); stroke-width: 1.5; }
+.mx-trend-dl { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.mx-trend-slope { flex: none; min-width: 6.5em; font-family: var(--font-mono); font-size: 0.85em; color: var(--text-muted); }
+.mx-trend-drift { color: var(--status-warn-fg); font-weight: 600; }
+.mx-dl-groups { display: grid; gap: var(--space-2, 8px); }
+.mx-dl-group, .mx-dl-new { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); }
+.mx-dl-gname { font-weight: 600; min-width: 8em; width: 12em; font: inherit; font-weight: 600;
+  background: transparent; color: inherit; border: 1px solid transparent; border-radius: 4px; padding: 2px 6px; }
+.mx-dl-gname:hover { border-color: var(--border, rgba(127,127,127,.35)); }
+.mx-dl-gname:focus { border-color: var(--accent, #4a8cff); background: var(--bg-input, rgba(127,127,127,.08)); outline: none; }
+.mx-dl-new input { min-width: 12em; }
+.mx-dl-defwarn { margin: var(--space-2, 8px) 0; }
+
+/* Dans le panneau latéral, l'habillage et le tally sont des sections comme les autres. */
+.mx-side .mx-overlay-box, .mx-side .mx-tally-box { border:0; border-top:1px solid var(--border-soft); border-radius:0;
+    padding:10px 0 0; margin-top:0; }
+.mx-side .mx-overlay-box input[type=text] { min-width:0; }
+.mx-side .mx-wipe-controls { padding-left:0; margin-left:0; border-left:0; }
+/* Rubriques : `.ctl-segtabs` du catalogue (static/css/controls.css), rien de propre ici. */
+.mx-side .mx-side-tabs { margin:0; }
+.mx-side-sec[hidden] { display:none; }
+.mx-side .mx-side-sec[data-sec] { border-top:0; padding-top:0; }
+/* Bloc transition (0.23.18) : gauche = transition commune, droite = keyers indépendants. */
+/* Touches du bloc transition (0.23.66) : taille FIXE du catalogue, rangées alignées à gauche qui
+ * passent à la ligne quand la place manque — jamais une touche étirée ni serrée. */
+.mx-take { flex-direction:row; flex-wrap:wrap; align-items:flex-start; gap:12px; }
+.mx-take-main, .mx-take-keys { display:flex; flex-direction:column; gap:10px; flex:none; max-width:100%; }
+.mx-take-keys { padding-left:12px; border-left:1px solid var(--border-soft); }
+.mx-next { display:flex; flex-wrap:wrap; gap:6px; }
+.mx-next-cell { display:flex; flex-direction:column; align-items:stretch; gap:4px; width:var(--ctl-bus-panel-w); }
+/* État d'antenne (maquette C) : nom du keyer, puis l'étiquette « ON » du catalogue sous .on2. */
+.mx-air-state { display:flex; flex-direction:column; align-items:center; gap:2px; min-height:2.6em;
+    font-family:var(--font-mono); font-size:0.72em; color:var(--text-muted); }
+.mx-modes { display:flex; gap:6px; flex-wrap:wrap; }
+/* Exécution (maquette C) : durée | AUTO | CUT, pleine largeur, en bas du bloc. */
+.mx-exec { margin-top:auto; display:flex; flex-wrap:wrap; gap:8px; align-items:stretch; }
+.mx-exec .mx-dur { flex:none; width:8.5em; }
+/* Keyers indépendants et DSK : une COLONNE par couche (ON AIR, AUTO, TIE, durée), de la largeur d'une
+ * touche ; les colonnes passent à la ligne ensemble, une couche ne se sépare jamais de sa durée. */
+.mx-keys-grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
+.mx-kcol { display:flex; flex-direction:column; gap:8px; flex:none; width:var(--ctl-bus-panel-w); }
+.mx-kdur { --ctl-ro-size:1.05em; }
+/* Rangée DSK (0.23.52) : sous le bloc transition, distincte des keyers ; CUT, AUTO, TIE, durée par DSK. */
+.mx-take-dsks { flex:1 0 100%; display:flex; flex-direction:column; gap:10px; min-width:0;
+    padding-top:10px; border-top:1px solid var(--border-soft); }
+/* Couche web (0.23.52) : URL de la page, état de l'onglet, aperçu. */
+.mx-k-web { align-items:flex-end; }
+.mx-k-web .mx-k-url { flex:1; min-width:0; }
+.mx-k-web input[type=text] { width:100%; min-width:0; min-height:32px; }
+.mx-web-status { margin:4px 0 0; }
+@media (max-width:1100px) { .mx-take-keys { padding-left:0; border-left:0; } }
+
+/* Sorties : matrice keyers × sorties (0.23.34). Points de croisement = petits poussoirs à voyant du
+   catalogue, réduits au voyant ; colonne d'une sortie qui porte tout = point fixe allumé. */
+.mx-xp-table { width:100%; border-collapse:collapse; font-size:.86em; }
+.mx-xp-table thead th { font-size:.72em; font-weight:600; letter-spacing:.8px; text-transform:uppercase;
+    color:var(--text-muted); text-align:center; padding:4px 6px; border-bottom:1px solid var(--border-soft); }
+.mx-xp-table thead th:first-child, .mx-xp-table tbody th { text-align:left; }
+.mx-xp-table td, .mx-xp-table tbody th { padding:8px 6px; border-bottom:1px solid var(--border-soft); vertical-align:middle; }
+.mx-xp-table td { text-align:center; width:72px; }
+.mx-xp-table tbody tr:last-child > * { border-bottom:0; }
+.mx-xp-k { display:block; font-weight:600; color:var(--text-strong); }
+.mx-xp-sub { display:block; font-size:.8em; font-weight:400; color:var(--text-muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+.mx-xp { width:30px; height:30px; min-height:0; padding:0; justify-content:center; }
+/* Point FIXE (sortie qui porte tout) : atténué, pour le distinguer d'un point basculable allumé. */
+.mx-xp:disabled { opacity:.55; cursor:default; }
+@media (pointer:coarse) { .mx-xp { width:44px; height:44px; } }
+
+/* ─── Volets composés (0.23.47) : bibliothèque en vignettes animées, éditeur A (volet 1 | résultat |
+ * volet 2), chronologie. Contrôles du catalogue ; ne reste ici que la mise en page. Trois colonnes
+ * quand l'éditeur a la place (panneau élargi), sinon empilées — au doigt sur iPad portrait. */
+.mx-comp { flex-direction:column; align-items:stretch; gap:8px; }
+.mx-comp-lib { display:flex; flex-wrap:wrap; gap:6px; }
+.mx-comp-lib .ctl-push--tile { width:132px; }
+.mx-comp-new { justify-content:center; align-items:center; min-height:96px; }
+.mx-comp-common { display:flex; flex-direction:column; gap:6px; padding-top:8px; border-top:1px dashed var(--border); }
+.mx-comp-common .meta { margin:0; }
+.mx-comp-plus { font-size:1.6em; line-height:1; color:var(--text-muted); }
+.mx-comp-ed { container-type:inline-size; display:flex; flex-direction:column; gap:10px;
+    padding-top:8px; border-top:1px dashed var(--border-soft); }
+.mx-comp-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; align-items:start; }
+@container (min-width: 700px) {
+    .mx-comp-grid { grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) minmax(0,1fr); }
+}
+.mx-comp-side, .mx-comp-mid { display:flex; flex-direction:column; gap:8px; min-width:0; }
+.mx-comp-side { padding:8px; border:1px solid var(--border-soft); border-radius:6px; background:var(--bg); }
+.mx-comp-scrub { flex:1; min-width:140px; }
+.mx-comp-actions input[type=text] { flex:1; min-width:150px; min-height:36px; }
+@media (pointer: coarse) { .mx-comp-actions input[type=text] { min-height:44px; } }
+#mx-comp-opknobs[hidden] { display:none; }
+
+/* ─── Assistant de configuration (0.23.56, maquette v3) ─────────────────────────────────────────
+   Le schéma est l'interface ; les contrôles viennent du catalogue (ctl-push, ctl-bus, ctl-readout,
+   ios-toggle, steppers globaux de <input type=number>). Ici : la mise en page seule, et le dessin
+   du schéma (spécifique légitime, comme la T-barre). */
+.mx-wiz-on > :not(.mxw-root):not(.mx-setup-banner) { display:none !important; }
+.mx-setup-banner { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:0 0 12px; padding:10px 12px;
+    border:1px solid var(--accent); background:var(--accent-soft); border-radius:var(--radius-small); }
+.mx-setup-banner > span { flex:1 1 16rem; }
+.mx-setup-banner.mx-setup-waiting { border-color:var(--border); background:var(--bg-elev); }
+.mxw { display:flex; flex-direction:column; gap:12px; min-width:0; }
+.mxw-head { display:flex; flex-direction:column; gap:4px; }
+.mxw-headline { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; min-width:0; }
+.mxw-title { font-size:1.15em; font-weight:700; color:var(--text-strong); }
+.mxw-lead, .mxw-help { color:var(--text-muted); font-size:0.9em; }
+.mxw-help { display:block; font-size:0.84em; font-weight:400; }
+.mxw-grid { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:16px; align-items:start; }
+.mxw-sch-wrap { position:relative; }
+.mxw-sub { font-size:0.72em; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted); margin-top:8px; }
+.mxw-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.mxw-sp { flex:1 1 0; }
+.mxw-list { display:flex; flex-direction:column; gap:2px; }
+.mxw-check { display:flex; align-items:center; gap:10px; min-height:44px; cursor:pointer; }
+.mxw-check input { flex:none; margin:0; }
+.mxw-num { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; min-height:44px; }
+.mxw-num input { width:6em; min-height:44px; }
+.mxw-field { display:grid; grid-template-columns:minmax(7rem,10rem) minmax(0,1fr); gap:8px 12px; align-items:center; }
+.mxw-input { min-height:44px; width:100%; padding:0 10px; border:1px solid var(--border); border-radius:var(--radius-small);
+    background:var(--bg-input); color:var(--text); font:inherit; font-family:var(--font-mono); box-sizing:border-box; }
+.mxw-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+.mxw-foot { display:flex; flex-wrap:wrap; align-items:center; gap:8px; border-top:1px solid var(--border-soft); padding-top:12px; }
+.mxw-adv > summary { list-style:none; display:inline-flex; min-height:44px; }
+.mxw-adv > summary::-webkit-details-marker { display:none; }
+.mxw-adv[open] > summary { margin-bottom:8px; }
+.mxw-warn { padding:12px; border:1px solid var(--status-warning-fg); background:var(--status-warning-bg); color:var(--text);
+    border-radius:var(--radius-small); font-size:0.93em; }
+.mxw-warn b, .mxw-warn-t { color:var(--status-warning-fg); }
+.mxw-cpu { display:block; font-size:0.8em; color:var(--status-warning-fg); }
+/* Sources synchrones (0.23.57) : encart du panneau des entrées ; bordé quand une entrée est en retard. */
+.mxw-sync { display:flex; flex-direction:column; gap:8px; padding:10px 12px; border:1px solid var(--border-soft);
+    border-radius:var(--radius-small); }
+.mxw-sync.warn { border-color:var(--status-warning-fg); background:var(--status-warning-bg); }
+.mxw-sync .mxw-sub { margin-top:0; }
+.mxw-sync-state { display:flex; flex-direction:column; gap:6px; }
+.mxw-sync .ctl-bus, .mxw-sync .ctl-push { min-height:44px; }
+/* Bandeau d'exploitation : entrées en retard sur le délai par défaut (0.23.57). */
+.mx-sync-banner { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:0 0 12px; padding:10px 12px;
+    border:1px solid var(--status-warning-fg); background:var(--status-warning-bg); border-radius:var(--radius-small); }
+.mx-sync-banner > span { flex:1 1 16rem; }
+.mx-sync-banner .ctl-push { min-height:44px; }
+.mxw-rb { display:inline-flex; align-items:center; gap:4px; margin-left:6px; padding:1px 7px; border-radius:3px; font-size:0.72em;
+    font-weight:600; vertical-align:middle; border:1px solid var(--border); color:var(--text-muted); white-space:nowrap;
+    text-transform:none; letter-spacing:0; }
+.mxw-rb.on { border-color:var(--status-warning-fg); background:var(--status-warning-bg); color:var(--status-warning-fg); }
+.mxw-hot { display:inline-flex; margin-left:6px; padding:1px 7px; border-radius:3px; font-size:0.72em; font-weight:600;
+    vertical-align:middle; color:var(--status-running-fg); background:var(--status-running-bg); white-space:nowrap;
+    text-transform:none; letter-spacing:0; }
+.mxw-ctx { background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius); padding:12px;
+    display:flex; flex-direction:column; gap:12px; position:sticky; top:12px; max-height:calc(100vh - 170px); overflow:auto; }
+.mxw-ctx-h { display:flex; align-items:center; gap:8px; }
+.mxw-ctx-t { font-weight:700; color:var(--text-strong); font-size:1.05em; margin-right:auto; }
+.mxw-ctx-h .ctl-push { min-width:44px; min-height:44px; justify-content:center; }
+.mxw-bar { position:sticky; bottom:0; z-index:4; background:var(--bg-elev); border-top:1px solid var(--border);
+    padding:10px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
+.mxw-bar .ctl-push, .mxw-foot .ctl-push, .mxw-headline .ctl-push, .mxw-band .ctl-push { min-height:44px; }
+.mxw-sum { flex:1 1 16rem; font-size:0.9em; color:var(--text-muted); }
+.mxw-legend { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:0.82em; color:var(--text-muted); margin:8px 0 4px; }
+.mxw-legend span::before { content:""; display:inline-block; width:18px; height:10px; margin-right:6px; vertical-align:middle;
+    border:1.5px solid var(--bus-keyer); border-radius:2px; }
+.mxw-legend .lw::before { border-color:var(--accent); border-style:dashed; }
+.mxw-legend .lo::before { border-color:var(--text-muted); border-style:dotted; }
+.mxw-legend .lr::before { content:"↻"; border:0; width:auto; color:var(--status-warning-fg); font-weight:700; }
+.mxw-rows { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:6px 16px; }
+.mxw-r-k { color:var(--text-muted); }
+.mxw-r-v { font-weight:600; overflow-wrap:anywhere; color:var(--text-strong); }
+.mxw-modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:40; display:flex; align-items:center;
+    justify-content:center; padding:16px; }
+.mxw-modal { width:min(34rem,100%); background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+    padding:16px; display:flex; flex-direction:column; gap:12px; }
+.mxw-modal h2 { margin:0; font-size:1.1em; color:var(--text-strong); }
+/* fil guidé (0.23.63, option B) : bandeau d'étapes AU-DESSUS du schéma — jamais posé dessus. Les pastilles
+   d'étapes sont le contrôle du catalogue `ctl-steps` ; le bloc de l'étape est encadré DANS le schéma,
+   derrière les éléments (.mxw-focus). */
+.mxw-band { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; padding:10px 16px; background:var(--bg-elev);
+    border:1px solid var(--border); border-radius:var(--radius); }
+.mxw-band-txt { flex:1 1 20rem; display:flex; flex-direction:column; gap:2px; min-width:0; }
+.mxw-band-t { font-weight:700; color:var(--text-strong); }
+/* schéma */
+.mxw-sch { width:100%; height:auto; display:block; background:var(--canvas-bg, var(--bg)); border:1px solid var(--border);
+    border-radius:var(--radius); touch-action:manipulation; }
+.mxw-sch text { font-family:var(--font-base); font-size:13px; fill:var(--text); pointer-events:none; }
+.mxw-sch .t-m { fill:var(--text-muted); font-size:11px; }
+.mxw-sch .t-s { fill:var(--text-strong); font-weight:700; }
+.mxw-sch .t-x { fill:var(--text-muted); font-size:11px; text-decoration:line-through; }
+.mxw-sch .t-src { fill:var(--bus-keyer); font-size:11px; font-weight:700; }
+.mxw-sch .t-p { font-size:11px; font-weight:700; fill:var(--text-strong); }
+.mxw-sch .t-poff { font-size:11px; fill:var(--text-muted); }
+.mxw-sch .rbm { fill:var(--status-warning-fg); font-size:12px; font-weight:700; }
+.mxw-sch .t-warn { fill:var(--status-warning-fg); font-size:11px; font-weight:700; }
+/* Transition (0.23.57) : dessinée, réglée en exploitation — ni geste ni survol. */
+.mxw-sch .box-fixed { fill:var(--bg-elev); stroke:var(--accent); stroke-width:1.2; stroke-dasharray:6 3; }
+.mxw-sch .mxw-fixed { cursor:default; }
+.mxw-sch .box { fill:var(--bg-elev); stroke:var(--border); stroke-width:1.2; }
+.mxw-sch .box-pgm { stroke:var(--bus-pgm); stroke-width:2; }
+.mxw-sch .box-pvw { stroke:var(--bus-pvw); stroke-width:2; }
+.mxw-sch .box-acc { fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.2; }
+.mxw-sch .box-key { fill:var(--bg-elev); stroke:var(--bus-keyer); stroke-width:1.4; }
+.mxw-sch .box-web { fill:var(--bg-elev); stroke:var(--accent); stroke-dasharray:5 3; stroke-width:1.4; }
+.mxw-sch .box-add { fill:transparent; stroke:var(--text-muted); stroke-dasharray:4 4; }
+.mxw-sch .box-off { fill:transparent; stroke:var(--text-muted); stroke-dasharray:3 4; opacity:.8; }
+.mxw-sch .box-src { fill:var(--bg-elev); stroke:var(--bus-keyer); stroke-width:2.4; }
+.mxw-sch .zone { fill:var(--accent-soft); stroke:none; opacity:.55; }
+.mxw-sch .pill-on { fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.4; }
+.mxw-sch .pill-off { fill:transparent; stroke:var(--text-muted); stroke-dasharray:2 3; }
+.mxw-sch .tally-on { fill:var(--bus-pgm); }
+.mxw-sch .tally-off { fill:none; stroke:var(--text-muted); }
+.mxw-sch .ln { stroke:var(--text-muted); fill:none; stroke-width:1.4; opacity:.75; }
+.mxw-sch .ln-acc { stroke:var(--accent); fill:none; stroke-width:2; }
+.mxw-sch .ln-off { stroke:var(--text-muted); fill:none; stroke-width:1.2; stroke-dasharray:3 5; opacity:.5; }
+.mxw-sch .ln-rail { stroke:var(--border); fill:none; stroke-width:2; }
+.mxw-sch .ln-bundle { stroke:var(--bus-keyer); fill:none; stroke-width:1.2; opacity:.45; }
+.mxw-sch .ln-src { stroke:var(--bus-keyer); fill:none; stroke-width:2.6; }
+.mxw-sch [data-el] { cursor:pointer; outline:none; }
+.mxw-sch [data-el]:hover > rect:first-child, .mxw-sch [data-el]:focus-visible > rect:first-child { stroke:var(--accent); stroke-width:2.2; }
+.mxw-sch [data-el].sel > rect:first-child { stroke:var(--accent); stroke-width:3; }
+.mxw-sch .mxw-focus { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2.5; pointer-events:none; }
+/* iPad (paysage compris) : schéma pleine largeur, cibles au doigt ; panneau en tiroir */
+@media (max-width:1280px) {
+    .mxw-grid { grid-template-columns:minmax(0,1fr); }
+    .mxw-ctx { position:fixed; max-width:720px; margin:0 auto; left:0; right:0; bottom:72px; top:auto; max-height:58vh; z-index:30;
+        border-radius:12px 12px 0 0; box-shadow:0 -8px 30px rgba(0,0,0,.35); }
+    .mxw-ctx.empty { display:none; }
+}
+@media (max-width:760px) {
+    .mxw-sch-wrap { overflow-x:auto; }
+    .mxw-sch { min-width:760px; }
+    .mxw-field { grid-template-columns:minmax(0,1fr); }
+}
+
+/* Surface DVE (0.23.61) : canevas de placement sur la base commune des éditeurs. Le dessin est fait
+   au canvas ; outils, verrous et interrupteur viennent du catalogue (ctl-toolbar, ctl-push, ctl-switch). */
+.mx-dve { display:flex; flex-direction:column; gap:6px; }
+.mx-dve-cv { display:block; width:100%; touch-action:none; border-radius:4px; background:var(--canvas-bg, var(--bg)); }
+.mx-dve-cv:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.mx-dve-locks { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
