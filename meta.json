@@ -1,7 +1,10 @@
 {
-  "version": "0.23.67",
-  "date": "2026-11-08",
+  "version": "0.23.68",
+  "date": "2026-11-09",
   "changes": {
+    "Version minimale du cœur déclarée (0.23.68)": [
+      "Le manifeste déclare `requires.core_min` = 0.9.14 : l'orchestrateur refuse de l'installer sur un cœur plus ancien et le dit. Valeur = le cœur avec lequel la version précédente a été faite. Rien ne change dans le conteneur : rien à redéployer."
+    ],
     "Le dépôt porte un README (0.23.67)": [
       "Le plugin n'en avait aucun, alors que tous les plugins publiés en portent un.",
       "Ce qu'il fait, où regarder quoi, la configuration, le câblage, le contrôle et les macros, l'assistant, les gardes, les prérequis."
