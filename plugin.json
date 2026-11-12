@@ -13,7 +13,7 @@
     "mode": "mixer",
     "desc_i18n": "settings.js.skh_desc_mixer"
   },
-  "version": "0.23.68",
+  "version": "0.23.69",
   "requires": {"core_min": "0.9.14"},
   "description": "Mélangeur N→PGM/CLEAN/PVW : N entrées (1-20), bus PGM (+ 1 à 4 keyers amont et 0 à 2 DSK aval, chacun dve/linear/luma/chroma/motif/page web), CLEAN, PVW, transitions (cut/dissolve/wipe). Piloté à chaud (page Traitements + pupitre ATEM). Mode tranche MXL opt-in (slice_mode).",
   "nav": {

@@ -3,7 +3,7 @@
 # Auteur : Cyril Mazouer, pour le compte de BOBI SAS
 # Distribué sous licence GNU GPL v3 (ou ultérieure) ; voir le fichier LICENSE.
 
-import mmap, struct, time, threading, json, os, signal, io
+import mmap, struct, time, threading, json, os, signal, io, sys
 from collections import deque
 import numpy as np
 import bobimxl   # migration MXL Phase 1 : N entrées Reader + 3 sorties Writer (PGM/CLEAN/PVW)
@@ -2002,6 +2002,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         # metrics.note_running_version). Sans elle, un processus resté sur l'ancienne version est
         # invisible — mesuré sur la Z8 le 29/10 (#227, 0.23.41 sous une base à 0.23.42).
         payload["plugin_version"] = PLUGIN_VERSION
+        payload["loop_timing"] = _lt_report()      # cf. TEMPS PERDU PAR LA BOUCLE PGM
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -2204,6 +2205,9 @@ def _state_doc():
         for _i in range(N_INPUTS):
             s["input_%d" % (_i + 1)] = state["inputs"][_i]
     s["inputs_timing"] = _inputs_timing()   # hors verrou : il le reprend
+    # Temps perdu par la boucle PGM (0.23.69) — HORS du verrou d'état, que la boucle prend au latch :
+    # même objet que :8080 (cf. TEMPS PERDU PAR LA BOUCLE PGM).
+    s["loop_timing"] = _lt_report()
     return s
 
 
@@ -3927,6 +3931,200 @@ def lire_frame_yuv(r):
         return None, None
 
 
+# ─── TEMPS PERDU PAR LA BOUCLE PGM (0.23.69, 2026-11-12) ─────────────────────────────────────
+# Question posée : le fil PGM perd-il du temps à l'INTERPRÉTEUR (GIL disputé par les fils HTTP,
+# /events, le fil PVW ; préemption) au point de justifier une boucle native ? `own_latency_ms` n'y
+# répond pas : c'est une moyenne de temps MURAL, où le calcul, les attentes d'entrée et le temps
+# passé à attendre le GIL se confondent. Ici, PAR TRAME, sur le fil de la boucle (fil principal) :
+#   elapsed = mural de la composition (ts_cycle_start → ts_out, la même fenêtre que own) ;
+#   cpu     = temps CPU du fil (time.thread_time_ns) sur la même fenêtre ;
+#   wait    = attentes d'entrée MESURÉES (get_slice du bind et des bandes, repli `get` borné) ;
+#   lost    = elapsed − cpu − wait : ni calcul ni attente d'entrée → GIL attendu, file d'exécution
+#             du noyau (préemption), ou blocage non instrumenté ;
+#   runq    = attente en file d'exécution (/proc/thread-self/schedstat, champ 2) : la part
+#             préemption de `lost` (approchée : un réveil de get_slice y compte aussi) ;
+#   wake    = retard du réveil sur le créneau TAI (mode tranche) — un GIL tenu par un autre fil à
+#             l'échéance du sleep retarde le DÉBUT de la trame, hors fenêtre elapsed ;
+#   native  = mural passé dans les noyaux C (bobimxl.mvk_*) ;
+#   sections= temps PROPRE (enfants exclus, noyaux C exclus) des parties Python/numpy : keyers
+#             (chroma, découpe linear/luma, motif, dve), masques de volet (rampes), volets, blend.
+# Fenêtre glissante de LT_WINDOW_S secondes, percentiles calculés à la demande (au plus une fois
+# par seconde) : publiés `loop_timing` sur :8080 et /state. Les replis numpy SILENCIEUX des noyaux
+# (retour False, exception) sont COMPTÉS — fil PGM exact, autres fils approchés (sans verrou).
+# Coût : un appel Python enveloppant par noyau et par section, une lecture procfs et un
+# thread_time_ns par trame. `loop_timing: false` (paramètre caché) retire tout.
+LT_ON = CONFIG.get("loop_timing", True) is not False
+LT_WINDOW_S = 60
+_LT_N = max(1, LT_WINDOW_S * FPS)
+_LT_SECTIONS = ("chroma", "cut", "pattern", "dve", "masks", "wipe", "kwipe", "blend")
+_LT_COLS = ("elapsed", "cpu", "wait", "lost", "runq", "wake", "native") + _LT_SECTIONS
+_LT_TID = threading.main_thread().ident     # la boucle vidéo tourne sur le fil principal
+_lt_ring = np.zeros((len(_LT_COLS), _LT_N), dtype=np.float32)
+_lt_pos = [0, 0]                            # prochaine case, trames enregistrées depuis le départ
+_lt_acc = dict((k, 0) for k in ("wait", "native", "wake") + _LT_SECTIONS)
+_lt_stack = []                              # sections ouvertes : [début ns, ns des enfants]
+_lt_over = [0, 0]                           # trames dont elapsed > période ; créneaux sautés
+_lt_nat = dict()                            # noyau → [appels, False, exceptions] (fil PGM)
+_lt_nat_other = dict()                      # idem, autres fils (fil PVW, outils) — approché
+_lt_cache = [0.0, None]
+try:
+    _LT_SCHED_FD = os.open("/proc/thread-self/schedstat", os.O_RDONLY)   # ouvert PAR le fil principal
+except Exception:
+    _LT_SCHED_FD = None
+
+
+def _lt_runq_ns():
+    """Attente cumulée en file d'exécution du fil principal (ns), ou None (schedstat absent)."""
+    if _LT_SCHED_FD is None:
+        return None
+    try:
+        return int(os.pread(_LT_SCHED_FD, 96, 0).split()[1])
+    except Exception:
+        return None
+
+
+def _lt_section(name):
+    """Décorateur : temps PROPRE de la fonction sur le fil PGM, ajouté à la section `name` (les
+    sections et noyaux appelés dedans sont décomptés). Autres fils, ou LT_ON faux : appel direct."""
+    def deco(fn):
+        if not LT_ON:
+            return fn
+        def wrapped(*a, **k):
+            if threading.get_ident() != _LT_TID:
+                return fn(*a, **k)
+            fr = [time.perf_counter_ns(), 0]
+            _lt_stack.append(fr)
+            try:
+                return fn(*a, **k)
+            finally:
+                _lt_stack.pop()
+                tot = time.perf_counter_ns() - fr[0]
+                _lt_acc[name] += tot - fr[1]
+                if _lt_stack:
+                    _lt_stack[-1][1] += tot
+        wrapped.__name__ = fn.__name__
+        wrapped.__doc__ = fn.__doc__
+        wrapped.__wrapped__ = fn
+        return wrapped
+    return deco
+
+
+def _lt_native(name, fn):
+    """Enveloppe d'un noyau C : compte appels / False / exceptions ; sur le fil PGM, ajoute son mural
+    à `native` et le décompte de la section appelante."""
+    def wrapped(*a, **k):
+        main = threading.get_ident() == _LT_TID
+        c = (_lt_nat if main else _lt_nat_other).setdefault(name, [0, 0, 0])
+        c[0] += 1
+        t0 = time.perf_counter_ns() if main else 0
+        try:
+            r = fn(*a, **k)
+        except Exception:
+            c[2] += 1
+            raise
+        finally:
+            if main:
+                dt = time.perf_counter_ns() - t0
+                _lt_acc["native"] += dt
+                if _lt_stack:
+                    _lt_stack[-1][1] += dt
+        if r is False:
+            c[1] += 1
+        return r
+    wrapped.__name__ = getattr(fn, "__name__", name)
+    wrapped.__wrapped__ = fn
+    return wrapped
+
+
+def _lt_wrap_native(mod):
+    """Enveloppe les noyaux mvk_* de `mod` (une fois). Rend les noms enveloppés."""
+    done = []
+    if not LT_ON:
+        return done
+    for nm in ("mvk_mixf_into", "mvk_mixmap_into", "mvk_place_into", "mvk_blend_into"):
+        f = getattr(mod, nm, None)
+        if f is None or getattr(f, "__wrapped__", None) is not None:
+            continue
+        setattr(mod, nm, _lt_native(nm, f))
+        done.append(nm)
+    return done
+
+
+_lt_wrap_native(bobimxl)
+
+
+def _lt_wait(ns):
+    """Attente d'entrée mesurée (ns) — comptée pour la trame en cours si on est sur le fil PGM."""
+    if ns > 0 and threading.get_ident() == _LT_TID:
+        _lt_acc["wait"] += int(ns)
+
+
+def _lt_begin():
+    """Ouverture de la fenêtre de la trame (au même instant que ts_cycle_start). Les cumuls ne sont
+    PAS remis à zéro ici mais à la fermeture : un masque calculé au latch (avant le créneau) compte
+    pour le tour qui le calcule, et le retard de réveil — mesuré avant — n'est pas effacé."""
+    return (time.perf_counter_ns(), time.thread_time_ns(), _lt_runq_ns())
+
+
+def _lt_end(t):
+    """Fermeture de la fenêtre : une ligne de plus dans l'anneau (ms)."""
+    if not LT_ON or t is None:
+        return None
+    w1 = time.perf_counter_ns(); c1 = time.thread_time_ns(); q1 = _lt_runq_ns()
+    el = w1 - t[0]; cpu = c1 - t[1]; wt = _lt_acc["wait"]
+    rq = (q1 - t[2]) if (q1 is not None and t[2] is not None) else 0
+    row = [el, cpu, wt, el - cpu - wt, rq, _lt_acc["wake"], _lt_acc["native"]] + [_lt_acc[s] for s in _LT_SECTIONS]
+    i = _lt_pos[0]
+    _lt_ring[:, i] = [v / 1e6 for v in row]
+    _lt_pos[0] = (i + 1) % _LT_N
+    _lt_pos[1] += 1
+    for k in _lt_acc:
+        _lt_acc[k] = 0
+    del _lt_stack[:]
+    if el > _SLOT_NS_LT:
+        _lt_over[0] += 1
+    return row
+
+
+_SLOT_NS_LT = int(round(1e9 / FPS))
+
+
+def _lt_pct(v):
+    if v.size == 0:
+        return None
+    p = np.percentile(v, (50.0, 99.0, 99.9))
+    return dict(p50=round(float(p[0]), 3), p99=round(float(p[1]), 3),
+                p999=round(float(p[2]), 3), max=round(float(v.max()), 3))
+
+
+def _lt_report(force=False):
+    """`loop_timing` publié (:8080, /state) — recalculé au plus une fois par seconde."""
+    if not LT_ON:
+        return None
+    now = time.monotonic()
+    if not force and _lt_cache[1] is not None and now - _lt_cache[0] < 1.0:
+        return _lt_cache[1]
+    n = min(_lt_pos[1], _LT_N)
+    d = _lt_ring[:, :n] if _lt_pos[1] < _LT_N else _lt_ring
+    cols = dict((c, d[j]) for j, c in enumerate(_LT_COLS))
+    nat = dict((k, dict(calls=v[0], false=v[1], errors=v[2])) for k, v in sorted(_lt_nat.items()))
+    nat_o = dict((k, dict(calls=v[0], false=v[1], errors=v[2])) for k, v in sorted(_lt_nat_other.items()))
+    tot = lambda m, j: sum(v[j] for v in m.values())
+    rep = dict(
+        window_s=LT_WINDOW_S, window_frames=int(n), frames=int(_lt_pos[1]),
+        period_ms=round(1000.0 / FPS, 3), switch_interval_ms=round(sys.getswitchinterval() * 1000.0, 3),
+        runq_source=("schedstat" if _LT_SCHED_FD is not None else None),
+        ms=dict((c, _lt_pct(cols[c])) for c in _LT_COLS[:7]),
+        sections_ms=dict((s, _lt_pct(cols[s])) for s in _LT_SECTIONS),
+        overruns_window=int(np.count_nonzero(cols["elapsed"] > 1000.0 / FPS)),
+        overruns=int(_lt_over[0]), skipped_slots=int(_lt_over[1]),
+        native=dict(pgm=dict(calls=tot(_lt_nat, 0), false=tot(_lt_nat, 1), errors=tot(_lt_nat, 2), by_fn=nat),
+                    other=dict(calls=tot(_lt_nat_other, 0), false=tot(_lt_nat_other, 1),
+                               errors=tot(_lt_nat_other, 2), by_fn=nat_o)))
+    _lt_cache[:] = [now, rep]
+    return rep
+
+
 # ─── Compositing helpers ────────────────────────────────────
 def blend_yuv(yuv_a, yuv_b, alpha):
     """Dissolve classique (planes Y/U/V en moyenne pondérée). Total des contributions = 1."""
@@ -4379,6 +4577,7 @@ def _color_planes(hexstr):
     return got
 
 
+@_lt_section("masks")
 def _wipe_masks(alpha, w, owner=None):
     """Masques d'UNE trame de volet. Sans bordure : (m, m_chroma), m = part de B. Avec bordure :
     (mC, mC_chroma, mB, mB_chroma, plans couleur) — deux COUCHES, comme un mélangeur : la bordure
@@ -4539,6 +4738,7 @@ def _wm_pair(wm):
     return (wm[0], wm[0]) if len(wm) == 2 else (wm[0], wm[2])
 
 
+@_lt_section("masks")
 def _composite_masks(alpha, comp, owner=None, flip=False):
     """Masques d'une trame de volet COMPOSÉ (cf. l'en-tête VOLETS COMPOSÉS), même forme que
     _wipe_masks. Chaque volet donne (part couverte c, part de B b) ; c = b sans bordure.
@@ -4617,6 +4817,7 @@ def _mixmap(dst, a, b, m, colstep=1):
     dst[...] = (a.astype(np.float32) * (1.0 - mm) + b.astype(np.float32) * mm).astype(_NP_DT)
 
 
+@_lt_section("wipe")
 def _wipe_compose(oy, ou, ov, A, B, wm, a, b):
     """Volet sur les lignes [a, b) (chroma [a/_CH, b/_CH)) des plans de sortie : A, B = dict de
     plans pleins (y, u, v), wm = _wipe_masks. Sans bordure : une passe. Avec : deux COUCHES — la
@@ -4919,7 +5120,11 @@ def _wait_next_slot():
     while True:
         g = int(bobimxl.current_index(FPS, 1))
         if g > _last_grid:
+            if _last_grid and g > _last_grid + 1:
+                _lt_over[1] += g - _last_grid - 1      # créneaux sans trame (tour trop long)
             _last_grid = g
+            # retard du réveil sur le début du créneau (cf. TEMPS PERDU PAR LA BOUCLE PGM)
+            _lt_acc["wake"] = (int(bobimxl.now_tai()) - _grid_phase) % _SLOT_NS
             return g
         if _last_grid - g > CLOCK_JUMP_SLOTS:
             _clock_jumps += 1
@@ -4968,13 +5173,17 @@ def _sl_bind(slot, grid, target, deadl, ts_in_per_slot, dbg):
             # (producteur mort mi-grain) → dernier grain complet direct, ZÉRO sonde, tant que
             # la tête n'avance pas — elle ne consomme plus aucun budget.
             dbg[4] += 1
+            _w0 = time.perf_counter_ns()
             got = r.get(fi - 1, timeout_ns=2_000_000) or r.get_latest()
+            _lt_wait(time.perf_counter_ns() - _w0)
             static = True
         else:
             # 1ʳᵉ tranche du grain ciblé (réveil au commit partiel) ; pas encore là / flux
             # whole-frame sans le patch slices → dernier grain complet (dégénéré, 0 attente).
             _left = max(1, int((deadl - time.monotonic()) * 1e9))
+            _w0 = time.perf_counter_ns()
             got = r.get_slice(fi, 1, timeout_ns=_left)
+            _lt_wait(time.perf_counter_ns() - _w0)
             if got is None:
                 got = r.get_latest(); static = True
                 bind_late = on_grid
@@ -5057,6 +5266,7 @@ def _sl_wait(st, need_row, deadl, dbg, safe=False):
     g = st["r"].get_slice(st["fi"], need_k, timeout_ns=max(1, int(_left * 1e9))) if _left > 0 else None
     dw = int((time.monotonic() - _w0) * 1e9)
     st["budget"] -= dw
+    _lt_wait(dw)
     if g is not None:
         st["valid"] = max(need_k, int(g[1].validSlices or need_k))
         return dw
@@ -5064,11 +5274,13 @@ def _sl_wait(st, need_row, deadl, dbg, safe=False):
     st["late"] = True
     _bk = _sl_backoff.get(st["slot"])
     _sl_backoff[st["slot"]] = [st["fi"], (_bk[1] + 1 if _bk and _bk[0] == st["fi"] else 1)]
+    _w1 = time.perf_counter_ns()
     try:
         gp = (st["r"].get_slice(st["fi"] - 1, st["total"], timeout_ns=2_000_000) if safe
               else st["r"].get(st["fi"] - 1, timeout_ns=2_000_000))
     except Exception:
         gp = None
+    _lt_wait(time.perf_counter_ns() - _w1)
     if gp is not None and gp[2].size == V_FRAME_SIZE:
         pl = gp[2]
         st["y"] = pl[:Y_SIZE].view(_NP_DT).reshape(HEIGHT, WIDTH)
@@ -5078,6 +5290,7 @@ def _sl_wait(st, need_row, deadl, dbg, safe=False):
     return dw
 
 
+@_lt_section("blend")
 def _sl_blend_band(oy, ou, ov, A, B, alpha, mode, wm, a, b):
     """Blend BGD de la bande [a,b) — MÊMES maths float32 que blend_yuv / blend_yuv_additive /
     blend_yuv_wipe (opérations per-pixel, ligne-locales) appliquées au DELTA de lignes →
@@ -5354,6 +5567,7 @@ def _gather_c(src, rows, cols, ccon):
     return _gather(np.ascontiguousarray(src), rows, cols, False)
 
 
+@_lt_section("chroma")
 def _sl_chroma_band(py, pu, pv, F, g, ct, a, b):
     """Keyer CHROMA sur la bande [a,b) du PGM. L'alpha est lu dans la table `ct` sur la chroma du
     fill, dans le rectangle source qui couvre la bande (index nearest de la géométrie fly/masque) ;
@@ -5540,6 +5754,7 @@ def _pattern_cut(ks, ka):
     return dict(kind="pattern", map=pm["map"], ka=kt, bmap=pm["bmap"], bcol=pm["bcol"])
 
 
+@_lt_section("pattern")
 def _sl_pattern_band(py, pu, pv, F, g, pc, a, b):
     """Keyer MOTIF sur la bande [a,b) : alpha = la carte du motif sous le rectangle visible (vue, sans
     copie), alpha d'antenne par table ; chroma : alpha au pixel luma PAIR (convention du linear)."""
@@ -5585,6 +5800,7 @@ def _blend8(dst, src, am):
     dst[...] = ((dst.astype(np.uint32) * (255 - a32) + src.astype(np.uint32) * a32) // 255).astype(_NP_DT)
 
 
+@_lt_section("cut")
 def _sl_keyer_alpha_band(py, pu, pv, F, KS, g, lut, a, b):
     """Keyer à DÉCOUPE (linear, luma) sur la bande [a,b) du PGM : alpha PAR PIXEL = lut[key], le
     key lu aux MÊMES index que le fill (même géométrie fly/masque, et le même grain — cf. le bind
@@ -5637,10 +5853,12 @@ def _read_pair(rf, rk):
         ts = None
     if rk is rf:
         return fill, fill, ts
+    _w0 = time.perf_counter_ns()
     try:
         gk = rk.get(int(got[0]), timeout_ns=2_000_000)
     except Exception:
         gk = None
+    _lt_wait(time.perf_counter_ns() - _w0)
     if gk is not None and len(gk[2]) == V_FRAME_SIZE:
         return fill, bytes(gk[2]), ts
     k, _ts = lire_frame_yuv(rk)
@@ -5672,6 +5890,7 @@ def _sl_key_one(kl, y, u, v, a, b, deadl, dbg, safe=False):
     return w
 
 
+@_lt_section("kwipe")
 def _sl_wipe_band(py, pu, pv, base, m, a, b):
     """AUTO de keyer en VOLET : bande [a,b) = base (avant le keyer) · (1 − m) + keyée · m, avec m le
     masque plein trame du volet (_wipe_masks). Même noyau que l'overlay (mvk_mixmap_into),
@@ -5807,6 +6026,7 @@ def _sl_stripe_band(py, pu, pv, ka, y0_, y1_, x0_, x1_, a, b):
         pv[c0:c1, cx0:cx1] = (reg * (1.0 - ka) + _NEUTf * ka).astype(_NP_DT)
 
 
+@_lt_section("dve")
 def _sl_keyer_band(py, pu, pv, K, g, ka, a, b, KK=None, lut=None):
     """Compose un keyer sur la bande [a,b) du PGM. DVE (`lut` None) — mêmes maths que
     composite_keyer_yuv (nearest + blend float32), en ne lisant du SOURCE que les lignes requises
@@ -6868,6 +7088,7 @@ while True:
     last_cycle_t = time.time()        # base de l'échéance d'attente de la réf, trame suivante
     _vid_idle.clear()                 # composition : le plan de contrôle attend (cf. _ctl_quiet)
     ts_cycle_start = time.time_ns()   # début du compositing (réf détectée + alignée) → base OWN
+    _lt_t = _lt_begin() if LT_ON else None   # fenêtre elapsed/cpu/wait/lost (cf. TEMPS PERDU)
     # ★ BASE TAI POUR LE TRANSIT, DISTINCTE DE CELLE DU TRAVAIL PROPRE (2026-10-23).
     # `Reader.last_write_time()` rend un instant **TAI** (epoch ST 2059) ; sa docstring donne même
     # la formule juste : `(now_tai() - last_write_time())/1e6`. Le transit la calculait pourtant
@@ -7000,6 +7221,7 @@ while True:
                     _pvw_cost_ms = (time.time_ns() - _t_pv) / 1e6
             _ecrire_sortie(out_pvw,   yuv_pvw,   out_index)
     ts_out = time.time_ns()
+    _lt_end(_lt_t)
 
     # Latence par slot consommé : Δ ts_out - ts_in, indexé par shm_name câblé
     # + skew d'alignement (ts_in - T) et flag « en retard » (genlock : hors fenêtre d'alignement).

@@ -1,7 +1,12 @@
 {
-  "version": "0.23.68",
-  "date": "2026-11-09",
+  "version": "0.23.69",
+  "date": "2026-11-12",
   "changes": {
+    "Temps perdu par la boucle PGM, mesuré (0.23.69)": [
+      "Question posée : le fil PGM perd-il du temps à l'interpréteur Python (GIL disputé par les fils HTTP, /events, le fil PVW ; préemption) au point de justifier une boucle native ? `own_latency_ms` ne le dit pas : c'est une moyenne murale où calcul, attentes d'entrée et attente du GIL se confondent.",
+      "Désormais, par trame et sur le fil de la boucle : elapsed (mural de la composition), cpu (temps CPU du FIL), wait (attentes d'entrée mesurées : 1re tranche au bind, bandes, replis bornés), lost = elapsed − cpu − wait, runq (attente en file d'exécution, schedstat), wake (retard du réveil sur le créneau TAI), native (temps dans les noyaux C). Sections Python/numpy en temps propre : keyers chroma, découpe linear/luma, motif, dve, masques de volet (rampes), volets, blend. p50/p99/p99.9/max sur 60 s.",
+      "Les replis numpy SILENCIEUX des noyaux C (retour False, exception) sont comptés, fil PGM et autres fils séparés ; créneaux sautés et trames trop longues aussi. Publié `loop_timing` sur :8080 et /state. Paramètre caché `loop_timing: false` pour tout retirer. Garde tests/verif_mixer_temps_perdu.py (17 mutations). Prend effet au prochain redéploiement."
+    ],
     "Version minimale du cœur déclarée (0.23.68)": [
       "Le manifeste déclare `requires.core_min` = 0.9.14 : l'orchestrateur refuse de l'installer sur un cœur plus ancien et le dit. Valeur = le cœur avec lequel la version précédente a été faite. Rien ne change dans le conteneur : rien à redéployer."
     ],

@@ -347,6 +347,12 @@ Le mélangeur peut composer et publier ses trois sorties **bande par bande** au 
   qu'elle écrit de nouveau ou qu'on la recâble. Le journal le dit une fois à la perte et une fois au
   retour, plus à chaque tentative. `dead_inputs` (numéros à partir de 1) et `dead_count` dans
   `/state` ; `dead_count` est un état de macro.
+- **Temps perdu par la boucle** (`loop_timing`, sur `:8080` et dans `/state`) : pour chaque image,
+  le temps mural de la composition, le temps CPU du fil, les attentes d'entrée et leur reste —
+  `lost`, ce que la boucle a passé ni à calculer ni à attendre une entrée (GIL tenu par un autre fil,
+  préemption) — en p50/p99/p99.9/max sur 60 s ; aussi le retard de réveil sur le créneau, le temps
+  passé dans les noyaux C et celui des parties Python/numpy (keyers, masques de volet), les créneaux
+  sautés, et les replis numpy d'un noyau C qui a refusé (`native.pgm.false`).
 
 ## Notes
 
